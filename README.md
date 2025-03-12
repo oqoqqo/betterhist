@@ -1,0 +1,2 @@
+# betterhist
+Better shell history
