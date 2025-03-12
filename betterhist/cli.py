@@ -1,16 +1,34 @@
 import asyncio
-from betterhist.views import pyte_view
+from betterhist.views import pyte_view, bot_format
 from betterhist.subshell import Subshell
 from betterhist.termsplit import TermSplit
 import os
 import signal
 import typer
 
-async def run():
+app = typer.Typer(invoke_without_command=True)
+
+# TODO: make history server
+
+history = [ (0, ['hello'], ['world']) ]
+
+@app.callback(invoke_without_command=True)
+def default(ctx: typer.Context):
+    if ctx.invoked_subcommand is None:
+        return asyncio.run(subshell())
+
+@app.command()
+async def get(index: int):
+    _, user_view, command_view = history[index]
+    print(bot_format(user_view, command_view))
+
+@app.command()
+async def subshell():
     server = os.environ.get("BETTERHIST_SERVER", None)
     if server is not None:
-        pass
+        return await get(-1)
     else:
+        os.environ["BETTERHIST_SERVER"] = "something"
         subshell = Subshell()
         termsplit = TermSplit(pid=subshell.pid, master_fd=subshell.master_fd)
 
@@ -20,13 +38,12 @@ async def run():
         async def async_on_stdin_data(data: bytes) -> bool:
             return termsplit.on_stdin_data(data)
 
-        snapshots = []
         def process_user_command_tuple(user_buffer, command_buffer):
             import time
             timestamp = time.time()
             columns, lines = os.get_terminal_size(subshell.stdin_fd)
             user_view, command_view = pyte_view(user_buffer, command_buffer, columns=columns, lines=lines)
-            snapshots.append((timestamp, user_view, command_view))
+            history.append((timestamp, user_view, command_view))
 
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGWINCH, subshell.on_resize)
@@ -51,7 +68,7 @@ async def run():
             else:
                 termsplit.on_idle()
 
-        for i, (timestamp, user_view, command_view) in enumerate(snapshots):
+        for i, (timestamp, user_view, command_view) in enumerate(history):
             import time
             formatted_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))
             print(f'-------------- user {i} ({formatted_time}) ---------------')
@@ -65,8 +82,8 @@ async def run():
 
         return status
 
-def actual_main():
-    return asyncio.run(run())
-
 def main():
-    return typer.run(actual_main)
+    app()
+
+if __name__ == '__main__':
+    main()
