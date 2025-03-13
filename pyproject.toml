@@ -8,8 +8,14 @@ version = "0.1.0"
 description = "Better Shell History"
 authors = [{ name = "Oqoqqo Halp", email = "oqoqqo@protonmail.com" }]
 dependencies = [
+  "fastapi",
+  "hypercorn",
+  "msgpack",
+  "pydantic",
   "pyte",
+  "requests",
   "typer",
+  "uvicorn",
 ]
 
 [project.scripts]

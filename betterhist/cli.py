@@ -1,8 +1,11 @@
 import asyncio
-from betterhist.views import pyte_view, bot_format
+from betterhist.listsrv import ListManagerServer
 from betterhist.subshell import Subshell
 from betterhist.termsplit import TermSplit
+from betterhist.views import pyte_view, markdown_format
+import msgpack
 import os
+import requests
 import signal
 import typer
 
@@ -10,25 +13,33 @@ app = typer.Typer(invoke_without_command=True)
 
 # TODO: make history server
 
-history = [ (0, ['hello'], ['world']) ]
-
 @app.callback(invoke_without_command=True)
 def default(ctx: typer.Context):
     if ctx.invoked_subcommand is None:
         return asyncio.run(subshell())
 
-@app.command()
-async def get(index: int):
-    _, user_view, command_view = history[index]
-    print(bot_format(user_view, command_view))
+@app.command(
+    context_settings={"ignore_unknown_options": True}
+)
+def get(index: int):
+    response = requests.get(f"{os.environ['BETTERHIST_SERVER']}/history/items/{index}")
+    response.raise_for_status()
+    item = msgpack.unpackb(response.content, raw=False)["item"]
+    user_view, command_view = pyte_view(user_buffer=item["user_buffer"], command_buffer=item["command_buffer"], columns=item["columns"], lines=item["lines"])
+    print(markdown_format(user_view=user_view, command_view=command_view))
+    return 0
 
 @app.command()
 async def subshell():
     server = os.environ.get("BETTERHIST_SERVER", None)
     if server is not None:
-        return await get(-1)
+        return get(-1)
     else:
-        os.environ["BETTERHIST_SERVER"] = "something"
+        listsrv = ListManagerServer()
+        listsrv.add_endpoint("history")
+        await listsrv.start()
+        os.environ["BETTERHIST_SERVER"] = f"http://127.0.0.1:{listsrv.assigned_port}"
+
         subshell = Subshell()
         termsplit = TermSplit(pid=subshell.pid, master_fd=subshell.master_fd)
 
@@ -42,8 +53,7 @@ async def subshell():
             import time
             timestamp = time.time()
             columns, lines = os.get_terminal_size(subshell.stdin_fd)
-            user_view, command_view = pyte_view(user_buffer, command_buffer, columns=columns, lines=lines)
-            history.append((timestamp, user_view, command_view))
+            listsrv.endpoints["history"].items.append({ "timestamp": timestamp, "columns": columns, "lines": lines, "user_buffer": user_buffer, "command_buffer": command_buffer })
 
         loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGWINCH, subshell.on_resize)
@@ -68,17 +78,11 @@ async def subshell():
             else:
                 termsplit.on_idle()
 
-        for i, (timestamp, user_view, command_view) in enumerate(history):
-            import time
-            formatted_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))
-            print(f'-------------- user {i} ({formatted_time}) ---------------')
-            for line in user_view:
-                print(line)
-            print(f'-------------- end user {i} ---------------')
-            print(f'-------------- command {i} ---------------')
-            for line in command_view:
-                print(line)
-            print(f'-------------- end command {i} ---------------')
+        await listsrv.shutdown()
+        try:
+            await dequeue_task.cancel()
+        except:
+            pass
 
         return status
 
