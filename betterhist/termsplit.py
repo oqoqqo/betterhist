@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 from dataclasses import dataclass, field, KW_ONLY
 from enum import IntEnum
 import fcntl
@@ -19,9 +20,19 @@ class TermSplit:
     pid: int
     master_fd: int
     state: State = field(default = State.WAIT_FOR_USER, init=False)
-    buffer: list[bytes] = field(default_factory=list, init=False)
+    buffer: deque[bytes] = field(default_factory=deque, init=False)
     queue: asyncio.Queue[tuple[bytes, bytes]] = field(default_factory=asyncio.Queue, init=False)
     wait_for_user_buffer: Optional[bytes] = field(default=None, init=False)
+
+    @property
+    def MAX_BUFFER_BYTES(self) -> int:
+        return 100_000
+
+    def _add_to_buffer(self, data: bytes):
+        self.buffer.append(data)
+        total_bytes = sum(len(item) for item in self.buffer)
+        while total_bytes > self.MAX_BUFFER_BYTES:
+            total_bytes -= len(self.buffer.popleft())
 
     def _get_foreground_pid(self) -> Optional[int]:
         buf = struct.pack("i", 0)
@@ -56,7 +67,7 @@ class TermSplit:
                 self._transition_user_to_command()
 
     def on_master_data(self, data: bytes) -> bool:
-        self.buffer.append(data)
+        self._add_to_buffer(data)
         if self.state == State.WAIT_FOR_COMMAND:
             self._edge_trigger_user_to_command()
 
