@@ -2,19 +2,19 @@ import aiosqlite
 import asyncio
 from dataclasses import dataclass, field, KW_ONLY
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
-import msgpack
+import json
 import os
 from pydantic import BaseModel
-import sqlite3
-import tempfile
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 import uvicorn
 
-# Request body model
-class Item(BaseModel):
-    value: Any
+class Snapshot(BaseModel):
+    timestamp: float
+    columns: int
+    lines: int
+    user_view: str
+    command_view: str
 
-# Authentication dependency
 async def verify_auth(x_betterhist_auth: str = Header(None)):
     auth_token = os.environ.get("BETTERHIST_AUTH")
     if not auth_token or x_betterhist_auth != auth_token:
@@ -33,7 +33,7 @@ class ListManagerEndpoint:
 
     async def startup(self):
         self.db_conn = await aiosqlite.connect(":memory:")
-        await self.db_conn.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, value BLOB)")
+        await self.db_conn.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, timestamp REAL, columns INTEGER, lines INTEGER, user_view TEXT, command_view TEXT)")
         await self.db_conn.commit()
         self.app.post(f"/{self.name}/items/")(self.add_item)
         self.app.get(f"/{self.name}/items/{{index}}")(self.get_item)
@@ -42,29 +42,27 @@ class ListManagerEndpoint:
         if hasattr(self, 'db_conn'):
             await self.db_conn.close()
 
-    async def add_item(self, item: Item, authenticated: bool = Depends(verify_auth)):
-        serialized_value = msgpack.packb(item.value, use_bin_type=True)
+    async def add_item(self, snapshot: Snapshot, authenticated: bool = Depends(verify_auth)):
         async with self.db_conn.cursor() as cursor:
-            await cursor.execute("INSERT INTO items (value) VALUES (?)", (serialized_value,))
+            await cursor.execute("INSERT INTO items (timestamp, columns, lines, user_view, command_view) VALUES (?, ?, ?, ?, ?)",
+                (snapshot.timestamp, snapshot.columns, snapshot.lines, snapshot.user_view, snapshot.command_view))
             await self.db_conn.commit()
             await cursor.execute("SELECT COUNT(*) FROM items")
             list_length = (await cursor.fetchone())[0]
-        return {"message": f"Item added to {self.name}", 
-                "value": item.value,
-                "list_length": list_length}
+        return {"message": f"Item added to {self.name}", "list_length": list_length}
 
     async def get_item(self, index: int, authenticated: bool = Depends(verify_auth)):
         async with self.db_conn.cursor() as cursor:
             if index >= 0:
                 await cursor.execute("""
-                    SELECT value
+                    SELECT timestamp, columns, lines, user_view, command_view
                     FROM items
                     ORDER BY id ASC
                     LIMIT 1 OFFSET ?
                 """, (index,))
             else:
                 await cursor.execute("""
-                    SELECT value
+                    SELECT timestamp, columns, lines, user_view, command_view
                     FROM items
                     ORDER BY id DESC
                     LIMIT 1 OFFSET ?
@@ -73,13 +71,15 @@ class ListManagerEndpoint:
             result = await cursor.fetchone()
 
         if result and result[0] is not None:
-            payload = {
-                "value": msgpack.unpackb(result[0], raw=False),
-                "index": index,
-                "list_name": self.name
-            }
-            packed = msgpack.packb(payload, use_bin_type=True)
-            return Response(content=packed, media_type="application/msgpack")
+            snapshot = Snapshot(
+                timestamp=result[0],
+                columns=result[1],
+                lines=result[2],
+                user_view=result[3],
+                command_view=result[4]
+            )
+            payload = { "snapshot": snapshot.model_dump(), "index": index, "list_name": self.name }
+            return Response(content=json.dumps(payload), media_type="application/json")
 
         async with self.db_conn.cursor() as cursor:
             await cursor.execute("SELECT COUNT(*) FROM items")

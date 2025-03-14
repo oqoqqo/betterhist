@@ -1,10 +1,9 @@
 import asyncio
-from betterhist.listsrv import ListManagerServer
+from betterhist.listsrv import ListManagerServer, Snapshot
 from betterhist.subshell import Subshell
 from betterhist.termsplit import TermSplit
-from betterhist.views import pyte_view, markdown_format
+from betterhist.views import pyte_view
 from functools import wraps
-import msgpack
 import os
 import pyte
 import requests
@@ -42,9 +41,14 @@ def get(index: int):
         raise ValueError("BETTERHIST_AUTH is not set, you need to run bh subshell first")
     response = requests.get(f"{os.environ['BETTERHIST_SERVER']}/history/items/{index}", headers={"X-Betterhist-Auth": auth_token})
     response.raise_for_status()
-    value = msgpack.unpackb(response.content, raw=False)["value"]
-    user_view, command_view = pyte_view(user_buffer=value["user_buffer"], command_buffer=value["command_buffer"], columns=value["columns"], lines=value["lines"])
-    print(markdown_format(user_view=user_view, command_view=command_view))
+    snapshot = Snapshot.model_validate(response.json()["snapshot"])
+    markdown = f"""
+```shell
+{snapshot.user_view}
+{snapshot.command_view}
+```
+    """.strip()
+    print(markdown)
     return 0
 
 @app.command()
@@ -53,11 +57,13 @@ async def subshell():
     if server is not None:
         return get(-1)
     else:
+        loop = asyncio.get_running_loop()
+
         listsrv = ListManagerServer()
-        await listsrv.add_endpoint("history")
         await listsrv.start()
         os.environ["BETTERHIST_SERVER"] = f"http://127.0.0.1:{listsrv.assigned_port}"
         os.environ["BETTERHIST_AUTH"] = uuid.uuid4().hex
+        await listsrv.add_endpoint("history")
 
         subshell = Subshell()
         termsplit = TermSplit(pid=subshell.pid, master_fd=subshell.master_fd)
@@ -72,13 +78,11 @@ async def subshell():
             import time
             timestamp = time.time()
             columns, lines = os.get_terminal_size(subshell.stdin_fd)
-            from betterhist.listsrv import Item
-            item = Item(value={ "timestamp": timestamp, "columns": columns, "lines": lines, "user_buffer": user_buffer, "command_buffer": command_buffer })
-            await listsrv.endpoints["history"].add_item(item)
+            user_view, command_view = await loop.run_in_executor(None, lambda: pyte_view(user_buffer=user_buffer, command_buffer=command_buffer, columns=columns, lines=lines))
+            snapshot = Snapshot(timestamp=timestamp, columns=columns, lines=lines, user_view=user_view, command_view=command_view)
+            await listsrv.endpoints["history"].add_item(snapshot)
 
-        loop = asyncio.get_running_loop()
         loop.add_signal_handler(signal.SIGWINCH, subshell.on_resize)
-
         middle_task = asyncio.create_task(subshell.man_in_the_middle(on_master_data=async_on_master_data, on_stdin_data=async_on_stdin_data))
         dequeue_task = asyncio.create_task(termsplit.get())
 

@@ -10,8 +10,6 @@ authors = [{ name = "Oqoqqo Halp", email = "oqoqqo@protonmail.com" }]
 dependencies = [
   "aiosqlite",
   "fastapi",
-  "hypercorn",
-  "msgpack",
   "pydantic",
   "pyte",
   "requests",
