@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Better Shell History"
 authors = [{ name = "Oqoqqo Halp", email = "oqoqqo@protonmail.com" }]
 dependencies = [
+  "aiosqlite",
   "fastapi",
   "hypercorn",
   "msgpack",

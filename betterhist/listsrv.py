@@ -1,3 +1,4 @@
+import aiosqlite
 import asyncio
 from dataclasses import dataclass, field, KW_ONLY
 from fastapi import FastAPI, HTTPException, Response
@@ -18,23 +19,25 @@ class ListManagerEndpoint:
     _: KW_ONLY
     name: str
     app: FastAPI
-    db_conn: sqlite3.Connection = field(init=False)
+    db_conn: aiosqlite.Connection = field(init=False)
     path: str = field(init=False)
 
     def __post_init__(self):
         fd, self.path = tempfile.mkstemp(suffix=f"_temp.db")
-        try:
-            self.db_conn = sqlite3.connect(f"file:{self.path}?mode=rwc", uri=True)
-            self.db_conn.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, value BLOB)")
-            self.db_conn.commit()
-            self.app.post(f"/{self.name}/items/")(self.add_item)
-            self.app.get(f"/{self.name}/items/{{index}}")(self.get_item)
-        finally:
-            os.close(fd)
+        os.close(fd)
+
+    async def startup(self):
+        self.db_conn = await aiosqlite.connect(f"file:{self.path}?mode=rwc", uri=True)
+        await self.db_conn.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, value BLOB)")
+        await self.db_conn.commit()
+        self.app.post(f"/{self.name}/items/")(self.add_item)
+        self.app.get(f"/{self.name}/items/{{index}}")(self.get_item)
+
+    async def shutdown(self):
+        if hasattr(self, 'db_conn'):
+            await self.db_conn.close()
 
     def __del__(self):
-        if hasattr(self, 'db_conn'):
-            self.db_conn.close()
         if hasattr(self, 'path'):
             try:
                 os.unlink(self.path)
@@ -43,55 +46,53 @@ class ListManagerEndpoint:
 
     async def add_item(self, item: Item):
         serialized_value = msgpack.packb(item.value, use_bin_type=True)
-        cursor = self.db_conn.cursor()
-        cursor.execute("INSERT INTO items (value) VALUES (?)", (serialized_value,))
-        self.db_conn.commit()
-        list_length = cursor.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        async with self.db_conn.cursor() as cursor:
+            await cursor.execute("INSERT INTO items (value) VALUES (?)", (serialized_value,))
+            await self.db_conn.commit()
+            await cursor.execute("SELECT COUNT(*) FROM items")
+            list_length = (await cursor.fetchone())[0]
         return {"message": f"Item added to {self.name}", 
                 "value": item.value,
                 "list_length": list_length}
 
     async def get_item(self, index: int):
-        cursor = self.db_conn.cursor()
+        async with self.db_conn.cursor() as cursor:
+            if index >= 0:
+                await cursor.execute("""
+                    SELECT value
+                    FROM items
+                    ORDER BY id ASC
+                    LIMIT 1 OFFSET ?
+                """, (index,))
+            else:
+                await cursor.execute("""
+                    SELECT value
+                    FROM items
+                    ORDER BY id DESC
+                    LIMIT 1 OFFSET ?
+                """, (-index - 1,))
 
-        if index >= 0:
-            cursor.execute("""
-                WITH total AS (SELECT COUNT(*) as cnt FROM items)
-                SELECT total.cnt, value
-                FROM items, total
-                ORDER BY id ASC
-                LIMIT 1 OFFSET ?
-            """, (index,))
-        else:
-            cursor.execute("""
-                WITH total AS (SELECT COUNT(*) as cnt FROM items)
-                SELECT total.cnt, value
-                FROM items, total
-                ORDER BY id DESC
-                LIMIT 1 OFFSET ?
-            """, (-index - 1,))
+            result = await cursor.fetchone()
 
-        result = cursor.fetchone()
-        if result:
-            list_length, serialized_value = result
-            if serialized_value is not None and (0 <= index < list_length or index < 0):
-                payload = {
-                    "value": msgpack.unpackb(serialized_value, raw=False),
-                    "index": index,
-                    "list_name": self.name
-                }
-                packed = msgpack.packb(payload, use_bin_type=True)
-                return Response(content=packed, media_type="application/msgpack")
+        if result and result[0] is not None:
+            payload = {
+                "value": msgpack.unpackb(result[0], raw=False),
+                "index": index,
+                "list_name": self.name
+            }
+            packed = msgpack.packb(payload, use_bin_type=True)
+            return Response(content=packed, media_type="application/msgpack")
 
-        list_length = cursor.execute("SELECT COUNT(*) FROM items").fetchone()[0]
-        raise HTTPException(status_code=404, 
-                           detail=f"Index out of range for {self.name}, length: {list_length}")
+        async with self.db_conn.cursor() as cursor:
+            await cursor.execute("SELECT COUNT(*) FROM items")
+            list_length = (await cursor.fetchone())[0]
+            raise HTTPException(status_code=404, detail=f"Index out of range for {self.name}, length: {list_length}")
 
 async def lifespan(app):
     try:
         yield
     except asyncio.CancelledError:
-        pass  # Suppress the error on shutdown
+        pass
 
 @dataclass
 class ListManagerServer:
@@ -105,6 +106,7 @@ class ListManagerServer:
         if name in self.endpoints:
             raise ValueError(f"Endpoint {name} already exists")
         endpoint = ListManagerEndpoint(name=name, app=self.app)
+        await endpoint.startup()
         for item in init_items:
             await endpoint.add_item(item)
         self.endpoints[name] = endpoint
@@ -142,3 +144,5 @@ class ListManagerServer:
             finally:
                 self.server_task = None
                 self.assigned_port = None
+
+        await asyncio.gather(*[endpoint.shutdown() for endpoint in self.endpoints.values()])
