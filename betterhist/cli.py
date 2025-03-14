@@ -10,6 +10,7 @@ import pyte
 import requests
 import signal
 import typer
+import uuid
 
 ### BEGIN monkeypatch pyte to ignore the private argument
 original_select_graphic_rendition = pyte.screens.Screen.select_graphic_rendition
@@ -34,7 +35,12 @@ def default(ctx: typer.Context):
     context_settings={"ignore_unknown_options": True}
 )
 def get(index: int):
-    response = requests.get(f"{os.environ['BETTERHIST_SERVER']}/history/items/{index}")
+    if os.environ.get("BETTERHIST_SERVER", None) is None:
+        raise ValueError("BETTERHIST_SERVER is not set, you need to run bh subshell first")
+    auth_token = os.environ.get("BETTERHIST_AUTH")
+    if auth_token is None:
+        raise ValueError("BETTERHIST_AUTH is not set, you need to run bh subshell first")
+    response = requests.get(f"{os.environ['BETTERHIST_SERVER']}/history/items/{index}", headers={"X-Betterhist-Auth": auth_token})
     response.raise_for_status()
     value = msgpack.unpackb(response.content, raw=False)["value"]
     user_view, command_view = pyte_view(user_buffer=value["user_buffer"], command_buffer=value["command_buffer"], columns=value["columns"], lines=value["lines"])
@@ -51,6 +57,7 @@ async def subshell():
         await listsrv.add_endpoint("history")
         await listsrv.start()
         os.environ["BETTERHIST_SERVER"] = f"http://127.0.0.1:{listsrv.assigned_port}"
+        os.environ["BETTERHIST_AUTH"] = uuid.uuid4().hex
 
         subshell = Subshell()
         termsplit = TermSplit(pid=subshell.pid, master_fd=subshell.master_fd)

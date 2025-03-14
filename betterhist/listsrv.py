@@ -1,7 +1,7 @@
 import aiosqlite
 import asyncio
 from dataclasses import dataclass, field, KW_ONLY
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 import msgpack
 import os
 from pydantic import BaseModel
@@ -14,20 +14,25 @@ import uvicorn
 class Item(BaseModel):
     value: Any
 
+# Authentication dependency
+async def verify_auth(x_betterhist_auth: str = Header(None)):
+    auth_token = os.environ.get("BETTERHIST_AUTH")
+    if not auth_token or x_betterhist_auth != auth_token:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing authentication token"
+        )
+    return True
+
 @dataclass
 class ListManagerEndpoint:
     _: KW_ONLY
     name: str
     app: FastAPI
     db_conn: aiosqlite.Connection = field(init=False)
-    path: str = field(init=False)
-
-    def __post_init__(self):
-        fd, self.path = tempfile.mkstemp(suffix=f"_temp.db")
-        os.close(fd)
 
     async def startup(self):
-        self.db_conn = await aiosqlite.connect(f"file:{self.path}?mode=rwc", uri=True)
+        self.db_conn = await aiosqlite.connect(":memory:")
         await self.db_conn.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, value BLOB)")
         await self.db_conn.commit()
         self.app.post(f"/{self.name}/items/")(self.add_item)
@@ -37,14 +42,7 @@ class ListManagerEndpoint:
         if hasattr(self, 'db_conn'):
             await self.db_conn.close()
 
-    def __del__(self):
-        if hasattr(self, 'path'):
-            try:
-                os.unlink(self.path)
-            except OSError:
-                pass
-
-    async def add_item(self, item: Item):
+    async def add_item(self, item: Item, authenticated: bool = Depends(verify_auth)):
         serialized_value = msgpack.packb(item.value, use_bin_type=True)
         async with self.db_conn.cursor() as cursor:
             await cursor.execute("INSERT INTO items (value) VALUES (?)", (serialized_value,))
@@ -55,7 +53,7 @@ class ListManagerEndpoint:
                 "value": item.value,
                 "list_length": list_length}
 
-    async def get_item(self, index: int):
+    async def get_item(self, index: int, authenticated: bool = Depends(verify_auth)):
         async with self.db_conn.cursor() as cursor:
             if index >= 0:
                 await cursor.execute("""
