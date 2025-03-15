@@ -2,8 +2,7 @@ import aiosqlite
 import asyncio
 from dataclasses import dataclass, field, KW_ONLY
 from enum import Enum
-from fastapi import Depends, FastAPI, Header, HTTPException, Response, Query
-import json
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 import os
 from pydantic import BaseModel
 from typing import Dict, List, Optional
@@ -37,6 +36,10 @@ class ListManagerEndpoint:
     app: FastAPI
     db_conn: aiosqlite.Connection = field(init=False)
 
+    @property
+    def max_items(self) -> int:
+        return 1_000
+
     async def startup(self):
         self.db_conn = await aiosqlite.connect(":memory:")
         await self.db_conn.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, timestamp REAL, columns INTEGER, lines INTEGER, user_view TEXT, command_view TEXT)")
@@ -51,11 +54,27 @@ class ListManagerEndpoint:
 
     async def add_item(self, snapshot: Snapshot, authenticated: bool = Depends(verify_auth)):
         async with self.db_conn.cursor() as cursor:
-            await cursor.execute("INSERT INTO items (timestamp, columns, lines, user_view, command_view) VALUES (?, ?, ?, ?, ?)",
-                (snapshot.timestamp, snapshot.columns, snapshot.lines, snapshot.user_view, snapshot.command_view))
-            await self.db_conn.commit()
-            await cursor.execute("SELECT COUNT(*) FROM items")
+            await cursor.execute("""
+                INSERT INTO items (timestamp, columns, lines, user_view, command_view)
+                VALUES (?, ?, ?, ?, ?)
+                RETURNING (SELECT COUNT(*) from items) AS list_length
+            """, (snapshot.timestamp, snapshot.columns, snapshot.lines, snapshot.user_view, snapshot.command_view))
+
             list_length = (await cursor.fetchone())[0]
+
+            if list_length > self.max_items:
+                await cursor.execute("""
+                    DELETE FROM items
+                    WHERE id IN (
+                        SELECT id FROM items
+                        ORDER BY id ASC
+                        LIMIT ?
+                    )
+                """, (list_length - self.max_items,))
+                list_length = self.max_items
+
+            await self.db_conn.commit()
+
         return {"message": f"Item added to {self.name}", "list_length": list_length}
 
     async def get_item(self, index: int, authenticated: bool = Depends(verify_auth)):
