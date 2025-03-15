@@ -1,5 +1,5 @@
 import asyncio
-from betterhist.listsrv import ListManagerServer, Snapshot
+from betterhist.listsrv import ListManagerServer, SearchLocation, Snapshot
 from betterhist.subshell import Subshell
 from betterhist.termsplit import TermSplit
 from betterhist.views import pyte_view
@@ -29,6 +29,38 @@ app = typer.Typer(invoke_without_command=True)
 def default(ctx: typer.Context):
     if ctx.invoked_subcommand is None:
         return asyncio.run(subshell())
+
+@app.command(
+    context_settings={"ignore_unknown_options": True}
+)
+def search(
+    pattern: str = typer.Argument(..., help="Search pattern"),
+    search_in: SearchLocation = typer.Option(SearchLocation.BOTH, help="Where to search: user_view, command_view, or both"),
+    limit: int = typer.Option(10, help="Maximum number of results to return"),
+    args: list[str] = typer.Argument(None)
+):
+    if args:
+        pattern = f"{pattern} {' '.join(args)}"
+    if os.environ.get("BETTERHIST_SERVER", None) is None:
+        raise ValueError("BETTERHIST_SERVER is not set, you need to run bh subshell first")
+    auth_token = os.environ.get("BETTERHIST_AUTH")
+    if auth_token is None:
+        raise ValueError("BETTERHIST_AUTH is not set, you need to run bh subshell first")
+    response = requests.get(f"{os.environ['BETTERHIST_SERVER']}/history/search",
+                            headers={"X-Betterhist-Auth": auth_token},
+                            params={"pattern": pattern, "search_in": search_in.value, "limit": limit})
+    response.raise_for_status()
+    columns, _ = os.get_terminal_size()
+    for item in response.json()["results"]:
+        id = item["id"]
+        snapshot = Snapshot.model_validate(item["snapshot"])
+        nice_user_view = snapshot.user_view.replace("\n", " ")
+        if len(nice_user_view) > columns//2:
+            nice_user_view = nice_user_view[:max(columns//2 - 4, 0)] + "..."
+        nice_command_view = snapshot.command_view.replace("\n", " ")
+        if len(nice_command_view) > columns//2:
+            nice_command_view = nice_command_view[:max(columns//2 - 4, 0)] + "..."
+        print(f"{id} {nice_user_view} {nice_command_view}")
 
 @app.command(
     context_settings={"ignore_unknown_options": True}

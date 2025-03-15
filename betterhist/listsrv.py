@@ -1,7 +1,8 @@
 import aiosqlite
 import asyncio
 from dataclasses import dataclass, field, KW_ONLY
-from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from enum import Enum
+from fastapi import Depends, FastAPI, Header, HTTPException, Response, Query
 import json
 import os
 from pydantic import BaseModel
@@ -24,6 +25,11 @@ async def verify_auth(x_betterhist_auth: str = Header(None)):
         )
     return True
 
+class SearchLocation(str, Enum):
+    USER_VIEW = "user_view"
+    COMMAND_VIEW = "command_view"
+    BOTH = "both"
+
 @dataclass
 class ListManagerEndpoint:
     _: KW_ONLY
@@ -37,6 +43,7 @@ class ListManagerEndpoint:
         await self.db_conn.commit()
         self.app.post(f"/{self.name}/items/")(self.add_item)
         self.app.get(f"/{self.name}/items/{{index}}")(self.get_item)
+        self.app.get(f"/{self.name}/search/")(self.search_items)
 
     async def shutdown(self):
         if hasattr(self, 'db_conn'):
@@ -78,13 +85,67 @@ class ListManagerEndpoint:
                 user_view=result[3],
                 command_view=result[4]
             )
-            payload = { "snapshot": snapshot.model_dump(), "index": index, "list_name": self.name }
-            return Response(content=json.dumps(payload), media_type="application/json")
+            return { "snapshot": snapshot.model_dump(), "index": index, "list_name": self.name }
 
         async with self.db_conn.cursor() as cursor:
             await cursor.execute("SELECT COUNT(*) FROM items")
             list_length = (await cursor.fetchone())[0]
             raise HTTPException(status_code=404, detail=f"Index out of range for {self.name}, length: {list_length}")
+
+    async def search_items(self,
+                           pattern: str = Query(..., description="Text pattern to search for"),
+                           search_in: SearchLocation = Query(SearchLocation.BOTH, description="Where to search: 'user_view', 'command_view', or 'both'"),
+                           limit: int = Query(10, description="Maximum number of results to return"),
+                           authenticated: bool = Depends(verify_auth)):
+        search_pattern = f"%{pattern}%"
+
+        if search_in == SearchLocation.USER_VIEW:
+            where = "user_view LIKE ?"
+            params = (search_pattern,)
+        elif search_in == SearchLocation.COMMAND_VIEW:
+            where = "command_view LIKE ?"
+            params = (search_pattern,)
+        else:  # Default to both
+            where = "(user_view LIKE ? OR command_view LIKE ?)"
+            params = (search_pattern, search_pattern)
+
+        query = f"""
+            SELECT id, timestamp, columns, lines, user_view, command_view
+            FROM items
+            WHERE {where}
+            ORDER BY id DESC
+            LIMIT ?
+        """
+        params = (*params, limit)
+
+        async with self.db_conn.cursor() as cursor:
+            await cursor.execute(query, params)
+            results = await cursor.fetchall()
+
+        if not results:
+            return {"message": "No matching items found", "results": []}
+
+        # Format the results
+        formatted_results = []
+        for row in results:
+            id_val, timestamp, columns, lines, user_view, command_view = row
+            snapshot = Snapshot(
+                timestamp=timestamp,
+                columns=columns,
+                lines=lines,
+                user_view=user_view,
+                command_view=command_view
+            )
+            formatted_results.append({
+                "id": id_val,
+                "snapshot": snapshot.model_dump()
+            })
+
+        return {
+            "message": f"Found {len(formatted_results)} matching items",
+            "list_name": self.name,
+            "results": formatted_results
+        }
 
 async def lifespan(app):
     try:
