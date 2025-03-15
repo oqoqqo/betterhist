@@ -83,8 +83,7 @@ class ListManagerEndpoint:
                 await cursor.execute("""
                     SELECT timestamp, columns, lines, user_view, command_view
                     FROM items
-                    ORDER BY id ASC
-                    LIMIT 1 OFFSET ?
+                    WHERE id = ?
                 """, (index,))
             else:
                 await cursor.execute("""
